@@ -1,5 +1,5 @@
 1. Script for Frankfort horizontal plane alignment
-2. 
+
 ``` python
 
 import numpy
@@ -102,8 +102,11 @@ transform3.SetMatrixTransformToParent(vTransform3.GetMatrix())
 transform2.SetAndObserveTransformNodeID(transform3.GetID())
 
 slicer.vtkSlicerTransformLogic().hardenTransform(V)
+```
+
 2. Script to pre-populate manual axes with already established landmarks 
 
+```python
 G=getNode('hard tissue')
 L=slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsLineNode')
 firstPoint = G.GetNthControlPointPositionVector(4)
@@ -156,8 +159,11 @@ L=slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsLineNode')
 firstPoint = G.GetNthControlPointPositionVector(10)
 L.AddControlPoint(firstPoint)
 L.SetName('mandibular ramus axis L')
+```
+
 3. Script for orthogonal projection of msR and msL for mastoid height measurement 
 
+```python
 plane = getNode('P')
 line = getNode('mastoid height L')
 import numpy as np
@@ -185,7 +191,7 @@ line.SetNthControlPointPositionWorld(1, *(point-planeNormal*distanceFromPlane))l
 ```
 
 4. Script to establish linear measurements and additional supporting linear distances via the allocated landmarks
-5. 
+   
 ```python
 F=getNode('soft tissue')
 L=slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsLineNode')
@@ -404,8 +410,6 @@ else:
 
 # Save result into the output node
 intersectionPointNode.AddControlPointWorld(inter_pt)
-
-
 
 
 lineNode = getNode('ear height L')
