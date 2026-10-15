@@ -30,6 +30,7 @@ class EarApproximationGUI(qt.QWidget):
 
         self.loadedLandmarks = {}
         self.planeNodes = {}
+        self.realignment_already_done = False
 
         outer = qt.QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
@@ -105,7 +106,20 @@ class EarApproximationGUI(qt.QWidget):
         self.createStep6_LinearMeasurements()
         self.createStep7_AnglesAndExport()
         self.createStep8_MetadataAndExport()
-
+        # Pre-flight: check for a pre-existing FHP plane
+        preflight = self.preflight_check_plane_and_landmarks()
+        if preflight is not None:
+            if preflight:
+                msg = ("Pre-existing FHP plane detected: "
+                       + ", ".join(preflight)
+                       + ". Realignment will be skipped.")
+            else:
+                msg = ("Pre-existing FHP plane 'P' detected. "
+                       "Realignment will be skipped.")
+            self.step1Status.setText(msg)
+            self.step2Status.setText(
+                msg + " Step 2 will be skipped — the scene is already aligned."
+            )
         self.currentStep = 0
         self.updateStepUI()
         self.show()
@@ -165,6 +179,51 @@ class EarApproximationGUI(qt.QWidget):
             raise RuntimeError(f"loadMarkups returned None for {url}")
         node.SetName(node_name)
         return node
+    def preflight_check_plane_and_landmarks(self):
+        """Scan the scene for a pre-existing FHP plane. If found:
+          - rename it to 'P' if it is called anything else
+          - rename any FH4-style landmark labels (por1, orb1, ...) to their
+            coded equivalents (poR, poL, zyoL, zyoR) in every fiducial node
+          - set self.realignment_already_done = True so Step 2 can be
+            skipped
+
+        Returns a list of change strings describing what was modified, or
+        None if no FHP plane was found.
+        """
+        # 1. Look for the plane
+        plane_found = None
+        for candidate in self.FHP_PLANE_NAMES:
+            node = self._find_node(candidate)
+            if node is not None and node.GetClassName() == "vtkMRMLMarkupsPlaneNode":
+                plane_found = node
+                break
+
+        if plane_found is None:
+            self.realignment_already_done = False
+            return None
+
+        changed = []
+
+        # 2. Rename the plane to 'P'
+        if plane_found.GetName() != "P":
+            changed.append(f"plane '{plane_found.GetName()}' -> 'P'")
+            plane_found.SetName("P")
+
+        # 3. Rename landmarks
+        rename_lower = {k.lower(): v for k, v in self.FHP_LANDMARK_RENAMES.items()}
+        for fid in slicer.util.getNodesByClass("vtkMRMLMarkupsFiducialNode"):
+            for i in range(fid.GetNumberOfControlPoints()):
+                lbl = (fid.GetNthControlPointLabel(i) or "").strip()
+                if lbl.lower() in rename_lower:
+                    new_lbl = rename_lower[lbl.lower()]
+                    if lbl != new_lbl:
+                        fid.SetNthControlPointLabel(i, new_lbl)
+                        changed.append(
+                            f"{lbl} -> {new_lbl} (in '{fid.GetName()}')"
+                        )
+
+        self.realignment_already_done = True
+        return changed
 
     # ==================================================================
     # STEP 1
@@ -201,7 +260,18 @@ class EarApproximationGUI(qt.QWidget):
         btn_check.setStyleSheet("background-color: #607D8B; color: white; padding: 6px;")
         btn_check.clicked.connect(self.onShowFH4LabelsClicked)
         layout.addWidget(btn_check)
-
+        
+        btn_preflight = qt.QPushButton("Check scene for an existing FHP plane")
+        btn_preflight.setStyleSheet(
+            "background-color: #FF9800; color: white; padding: 6px;"
+        )
+        btn_preflight.setToolTip(
+            "Scans the scene for a plane named P / FHP / Frankfort. If one "
+            "is found, renames it to 'P', renames FH4-style landmarks to "
+            "their coded equivalents, and marks Step 2 as skipped."
+        )
+        btn_preflight.clicked.connect(self.onPreflightClicked)
+        layout.addWidget(btn_preflight)
         self.step1Status = qt.QLabel("Status: waiting.")
         self.step1Status.setWordWrap(True)
         self.step1Status.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
@@ -210,6 +280,24 @@ class EarApproximationGUI(qt.QWidget):
 
         layout.addStretch(1)
         self._add_step(w)
+
+    def onPreflightClicked(self):
+        changed = self.preflight_check_plane_and_landmarks()
+        if changed is None:
+            self.step1Status.setText(
+                "No pre-existing FHP plane found in the scene. Run the "
+                "Frankfort alignment in Step 2 as usual."
+            )
+        else:
+            self.step1Status.setText(
+                "FHP plane found and prepared: " + ", ".join(changed)
+                + ". Realignment will be skipped."
+            )
+            self.step2Status.setText(
+                "Realignment skipped — a pre-existing plane P is present. "
+                "Proceed to Step 3."
+            )
+        self.statusLabel.setText(self.step1Status.text)
 
     def onDownloadFH4Clicked(self):
         self.step1Status.setText("Downloading FH4_landmarks.json ...")
@@ -284,10 +372,17 @@ class EarApproximationGUI(qt.QWidget):
 
     def onRunFHPAlignmentClicked(self):
         F = self.loadedLandmarks.get("fh4") or self._find_node("FH4_landmarks")
+        
         if not F:
             self.step2Status.setText("Error: FH4_landmarks not loaded. Run Step 1 first.")
             return
-
+        if getattr(self, "realignment_already_done", False):
+            self.step2Status.setText(
+                "Skipped: a pre-existing plane 'P' was found in the scene, "
+                "so realignment is unnecessary. Proceed to Step 3."
+            )
+            self.statusLabel.setText(self.step2Status.text)
+            return
         try:
             poR = self._landmark_position(F, "poR")
             poL = self._landmark_position(F, "poL")
@@ -728,6 +823,10 @@ class EarApproximationGUI(qt.QWidget):
         slicer.app.processEvents()
         try:
             node = self._download_json(REPO_FILES["hard_tissue"], "hard tissue")
+             # Defensive: unlock any points that came in locked
+            for i in range(node.GetNumberOfControlPoints()):
+                if node.GetNthControlPointLocked(i):
+                    node.SetNthControlPointLocked(i, False)
             labels = [node.GetNthControlPointLabel(i)
                       for i in range(node.GetNumberOfControlPoints())]
             self.loadedLandmarks["hard_tissue"] = node
@@ -934,6 +1033,23 @@ class EarApproximationGUI(qt.QWidget):
         ("L supramastoid crest",     None),
         ("R supramastoid crest",     None),
     ]
+    # Names of an existing FHP plane that trigger the "already aligned" path
+    FHP_PLANE_NAMES = ("P", "FHP", "Frankfort", "Frankfort horizontal")
+
+    # Landmark renames applied when a pre-existing FHP plane is detected.
+    # Key = current label (lowercased for lookup), value = coded label.
+    # Includes both the raw FH4 file labels and the already-coded forms
+    # so the operation is idempotent.
+    FHP_LANDMARK_RENAMES = {
+        "por1": "poR",
+        "por2": "poL",
+        "orb1": "zyoL",
+        "orb2": "zyoR",
+        "por":  "poR",
+        "pol":  "poL",
+        "zyol": "zyoL",
+        "zyor": "zyoR",
+    }
 
     def createStep6_LinearMeasurements(self):
         w = qt.QWidget()
@@ -1676,7 +1792,7 @@ class EarApproximationGUI(qt.QWidget):
                     failed.append(f"{angle_name}: unknown end_spec {end_spec}")
                     continue
 
-# ---- Guard against degenerate angles ----
+            # ---- Guard against degenerate angles ----
             if b_pt is not None:
                 MIN_ARM = 0.5
                 dAV = float(np.linalg.norm(a_pt - vertex_pt))
@@ -1906,6 +2022,8 @@ class EarApproximationGUI(qt.QWidget):
                 n_expected += 1
                 val = self._measurement_value(node_name)
                 row_cells.append(val)
+                if val:
+                    n_filled += 1
         if self.include_header_checkbox.isChecked():
             text = "\t".join(header_cells) + "\n" + "\t".join(row_cells) + "\n"
         else:
