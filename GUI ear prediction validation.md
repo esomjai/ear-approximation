@@ -15,7 +15,7 @@ import slicer
 REPO_RAW = "https://raw.githubusercontent.com/esomjai/ear-approximation/main"
 REPO_FILES = {
     "fh4":               REPO_RAW + "/FH4_landmarks.json",
-    "hard_tissue":       REPO_RAW + "/hard%20tissue.json",
+    "hard_tissue":       REPO_RAW + "/hard%20tissue.mrk.json",
     "soft_tissue":       REPO_RAW + "/soft%20tissue.mrk.json",
     "lateral_template":  REPO_RAW + "/for%20L%20mastoid%20lateral%20angle.mrk.json",
 }
@@ -760,20 +760,16 @@ class EarApproximationGUI(qt.QWidget):
             "<b>5b. Create the four reference planes.</b> The button below "
             "clones plane <code>P</code> into <code>SagR</code>, "
             "<code>SagL</code>, <code>CorR</code>, <code>CorL</code> and "
-            "applies the two rotations described in the protocol "
-            "(90 degrees in LR first, then 90 degrees in IS on the sagittal "
-            "pair). The rotations are applied to temporary transform nodes "
-            "that are hardened automatically.<br><br>"
-            "<b>Manual work after creating the planes:</b><br>"
-            "&nbsp;&nbsp;• Enable <i>Interaction handles</i> in the Markups "
-            "module: Display -> Interaction -> Visibility and Translate.<br>"
-            "&nbsp;&nbsp;• Move <b>SagR</b> until it passes through "
-            "<b>obsR</b>, and <b>SagL</b> through <b>obsL</b>.<br>"
-            "&nbsp;&nbsp;• Move <b>CorR</b> until it passes through the "
-            "manual endpoint of <b>main axis of right mastoid I</b>, and "
-            "<b>CorL</b> through the endpoint of <b>main axis of left mastoid I</b>.<br>"
-            "&nbsp;&nbsp;• If a plane refuses to move, its control points are "
-            "locked — unlock them in the Markups module."
+            "positions them automatically:<br>"
+            "&nbsp;&nbsp;• <b>SagR</b> is placed through <b>obsR</b> "
+            "(parasagittal, normal along LR).<br>"
+            "&nbsp;&nbsp;• <b>SagL</b> is placed through <b>obsL</b>.<br>"
+            "&nbsp;&nbsp;• <b>CorR</b> is placed through the manual endpoint "
+            "of <b>main axis of right mastoid I</b> (coronal, normal along AP).<br>"
+            "&nbsp;&nbsp;• <b>CorL</b> is placed through the manual endpoint "
+            "of <b>main axis of left mastoid I</b>.<br><br>"
+            "All four planes are automatically perpendicular to plane "
+            "<code>P</code>. No manual adjustment is required."
         )
         info.setTextFormat(qt.Qt.RichText)
         info.setWordWrap(True)
@@ -960,7 +956,8 @@ class EarApproximationGUI(qt.QWidget):
                 f"  SagL (parasagittal, normal={LR}) through obsL\n"
                 f"  CorR (coronal, normal={AP}) through mastoid-R endpoint\n"
                 f"  CorL (coronal, normal={AP}) through mastoid-L endpoint\n"
-                "All four are perpendicular to plane P."
+                "All four are perpendicular to plane P. "
+                "No manual adjustment is required — proceed to Step 6."
             )
         except ValueError as e:
             self.step5Status.setText(f"Error locating landmark: {e}")
@@ -1068,11 +1065,11 @@ class EarApproximationGUI(qt.QWidget):
             "<code>ear protrusion L obs-hx</code>, and "
             "<code>for hard nose angle</code> are also created — they will "
             "feed the angle measurements in Step 7.<br><br>"
-            "<b>Manual work after running:</b><br>"
-            "&nbsp;&nbsp;• Enable <i>Interaction handles</i> in the Markups "
-            "module and adjust the line <b>for hard nose angle</b> so it "
-            "crosses plane <b>P</b>. Use only the red arrow to preserve the "
-            "line's orientation.<br>"
+            "<b>Next steps:</b><br>"
+            "&nbsp;&nbsp;• Click <b>Extend 'for hard nose angle'</b> to "
+            "lengthen the line along its own direction until it crosses "
+            "plane <b>P</b>. No manual dragging is required — the line's "
+            "orientation is preserved automatically.<br>"
             "&nbsp;&nbsp;• The three reference lines (two ear protrusions, "
             "one for hard nose angle) are <b>excluded from the database</b> — "
             "they exist only to feed the angle measurements."
@@ -1253,8 +1250,8 @@ class EarApproximationGUI(qt.QWidget):
         if failed:
             msg += " Failed: " + " | ".join(failed)
         msg += (
-            "\n\nNext: adjust 'for hard nose angle' so it crosses plane P, "
-            "then use the copy button."
+            "\n\nNext: click the 'Extend for hard nose angle' button so the "
+            "line crosses plane P, then use the copy button."
         )
         self.step6Status.setText(msg)
         self.statusLabel.setText(msg)
@@ -1791,6 +1788,15 @@ class EarApproximationGUI(qt.QWidget):
                 else:
                     failed.append(f"{angle_name}: unknown end_spec {end_spec}")
                     continue
+          # --- NEW FIX: Ensure B point is not the vertex ---
+            if b_pt is not None and np.linalg.norm(b_pt - vertex_pt) < 0.01:
+                # If it picked the vertex, get the other endpoint of the line
+                p0 = np.array(proj_line.GetNthControlPointPositionWorld(0))
+                p1 = np.array(proj_line.GetNthControlPointPositionWorld(1))
+                if np.linalg.norm(p0 - vertex_pt) > np.linalg.norm(p1 - vertex_pt):
+                    b_pt = p0
+                else:
+                    b_pt = p1
 
             # ---- Guard against degenerate angles ----
             if b_pt is not None:
@@ -1828,9 +1834,8 @@ class EarApproximationGUI(qt.QWidget):
         msg = (
             f"Created {len(created)} of {len(self.ANGLE_SPECS)} angle nodes, "
             "each with all three control points placed automatically.\n\n"
-            "Verify visually in the 3D view. If any angle looks wrong, "
-            "drag the corresponding endpoint to fix it — the measurement "
-            "updates live."
+            "All measurements are ready for export. You may visually verify "
+            "them in the 3D view, but no manual adjustment is required."
         )
         if failed:
             msg += "\n\nSome angles could not be created:\n  " + "\n  ".join(failed)
@@ -1888,9 +1893,11 @@ class EarApproximationGUI(qt.QWidget):
         self.meta_id = qt.QLineEdit()
         subj_form.addRow("ID:", self.meta_id)
 
-        self.meta_age = qt.QSpinBox()
-        self.meta_age.setRange(0, 130)
-        self.meta_age.setSuffix(" years")
+        self.meta_age = qt.QLineEdit()
+        # Only allow numbers (0-130)
+        validator = qt.QIntValidator(0, 130, self.meta_age)
+        self.meta_age.setValidator(validator)
+        self.meta_age.setPlaceholderText("Enter age in years")
         subj_form.addRow("Age:", self.meta_age)
 
         self.meta_sex = qt.QComboBox()
@@ -1989,7 +1996,7 @@ class EarApproximationGUI(qt.QWidget):
         preserved."""
         # ---- Read metadata ----
         subject_id = self.meta_id.text.strip()
-        age = str(self.meta_age.value)
+        age = self.meta_age.text.strip()
         sex = self.meta_sex.currentText
         source = self.meta_source.text.strip()
 
