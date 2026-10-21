@@ -1546,6 +1546,67 @@ class EarApproximationGUI(qt.QWidget):
         if abs(p0[0] - mid_x) <= abs(p1[0] - mid_x):
             return p0
         return p1
+    def _pick_b_point(self, proj_line, end_spec, ap_axis, lr_axis, mid_x):
+        """Choose the B endpoint of a projected line according to end_spec.
+        Returns None if end_spec is unknown."""
+        if end_spec == "anterior":
+            return self._endpoint_along_axis(proj_line, ap_axis)
+        if end_spec == "posterior":
+            return self._endpoint_along_axis(proj_line, -ap_axis)
+        if end_spec == "lateral_left":
+            return self._endpoint_along_axis(proj_line, lr_axis)
+        if end_spec == "lateral_right":
+            return self._endpoint_along_axis(proj_line, -lr_axis)
+        if end_spec == "lateralmost":
+            return self._endpoint_lateralmost(proj_line, mid_x)
+        if end_spec == "medial":
+            return self._endpoint_medial(proj_line, mid_x)
+        return None
+
+    def _elongate_projected_line(self, proj_line, end_spec, ap_axis,
+                                 lr_axis, mid_x, min_len, vertex_pt):
+        """Symmetric elongation of a projected line about its midpoint.
+
+        - Preserves the line's direction exactly.
+        - Extends to at least `min_len` on each side of the midpoint, and
+          also ensures the vertex is *inside* the new segment by a small
+          margin (so the line clearly crosses the vertex plane).
+        - Re-picks the B endpoint with the same end_spec.
+        - Modifies the node in place and returns the new B point (numpy
+          array), or None if something went wrong.
+        """
+        try:
+            p0 = np.array(proj_line.GetNthControlPointPositionWorld(0))
+            p1 = np.array(proj_line.GetNthControlPointPositionWorld(1))
+            direction = p1 - p0
+            length = float(np.linalg.norm(direction))
+            if length < 1e-9:
+                return None
+            unit_dir = direction / length
+
+            midpoint = (p0 + p1) / 2.0
+
+            # How far the vertex is from the midpoint, projected onto the
+            # line's own direction. We must reach at least that far plus
+            # a margin so the vertex lies inside the new segment.
+            proj_of_vertex = float(np.dot(vertex_pt - midpoint, unit_dir))
+            margin = 20.0  # mm of overshoot past the vertex
+            half_len = max(min_len, abs(proj_of_vertex) + margin)
+
+            new_p0 = midpoint - unit_dir * half_len
+            new_p1 = midpoint + unit_dir * half_len
+
+            was_modified = proj_line.StartModify()
+            proj_line.SetNthControlPointPositionWorld(0, *new_p0)
+            proj_line.SetNthControlPointPositionWorld(1, *new_p1)
+            proj_line.EndModify(was_modified)
+
+            # Re-pick B with the same rule
+            return self._pick_b_point(
+                proj_line, end_spec, ap_axis, lr_axis, mid_x
+            )
+        except Exception:
+            return None
     # ------------------------------------------------------------------
     # 7b — lateral angle lines
     # ------------------------------------------------------------------
@@ -1755,6 +1816,7 @@ class EarApproximationGUI(qt.QWidget):
 
             # ---- B point (auto, from projected line endpoint) ----
             b_pt = None
+            proj_line = None
             if b_rule is not None:
                 kind, target_line_name, end_spec = b_rule
                 if kind != "projected":
@@ -1773,24 +1835,13 @@ class EarApproximationGUI(qt.QWidget):
                     )
                     continue
 
-                if end_spec == "anterior":
-                    b_pt = self._endpoint_along_axis(proj_line, ap_axis)
-                elif end_spec == "posterior":
-                    b_pt = self._endpoint_along_axis(proj_line, -ap_axis)
-                elif end_spec == "lateral_left":
-                    b_pt = self._endpoint_along_axis(proj_line, lr_axis)
-                elif end_spec == "lateral_right":
-                    b_pt = self._endpoint_along_axis(proj_line, -lr_axis)
-                elif end_spec == "lateralmost":
-                    b_pt = self._endpoint_lateralmost(proj_line, mid_x)
-                elif end_spec == "medial":
-                    b_pt = self._endpoint_medial(proj_line, mid_x)
-                else:
+                b_pt = self._pick_b_point(proj_line, end_spec, ap_axis, lr_axis, mid_x)
+                if b_pt is None:
                     failed.append(f"{angle_name}: unknown end_spec {end_spec}")
                     continue
-          # --- NEW FIX: Ensure B point is not the vertex ---
+
+            # ---- NEW FIX: Ensure B point is not the vertex ----
             if b_pt is not None and np.linalg.norm(b_pt - vertex_pt) < 0.01:
-                # If it picked the vertex, get the other endpoint of the line
                 p0 = np.array(proj_line.GetNthControlPointPositionWorld(0))
                 p1 = np.array(proj_line.GetNthControlPointPositionWorld(1))
                 if np.linalg.norm(p0 - vertex_pt) > np.linalg.norm(p1 - vertex_pt):
@@ -1798,11 +1849,26 @@ class EarApproximationGUI(qt.QWidget):
                 else:
                     b_pt = p1
 
-            # ---- Guard against degenerate angles ----
+            # ---- Guard against degenerate angles, with auto-elongation ----
+            MIN_ARM = 0.5
             if b_pt is not None:
-                MIN_ARM = 0.5
                 dAV = float(np.linalg.norm(a_pt - vertex_pt))
                 dBV = float(np.linalg.norm(b_pt - vertex_pt))
+
+                # If B arm is too short and the B point came from a projected
+                # line, elongate that line symmetrically about its midpoint
+                # (preserving its direction) and re-pick B. Try a few
+                # increasingly large factors before giving up.
+                if dBV < MIN_ARM and proj_line is not None:
+                    elongated = self._elongate_projected_line(
+                        proj_line, end_spec, ap_axis, lr_axis, mid_x,
+                        min_len=min(50.0, 10.0 / max(MIN_ARM, 0.1)),
+                        vertex_pt=vertex_pt,
+                    )
+                    if elongated is not None:
+                        b_pt = elongated
+                        dBV = float(np.linalg.norm(b_pt - vertex_pt))
+
                 if dAV < MIN_ARM or dBV < MIN_ARM:
                     failed.append(
                         f"{angle_name}: arm too short "
